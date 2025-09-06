@@ -1,0 +1,84 @@
+services:
+
+  ##############################
+  # Frontend SSR (Angular)
+  ##############################
+  frontend-ssr:
+    build:
+      context: ../frontend/frontend-gaming-master-public
+      dockerfile: Dockerfile
+    container_name: frontend-ssr
+    ports:
+      - "4000:4000"
+    restart: always
+    networks:
+      - web
+
+  ##############################
+  # Frontend Internal (Static SPA)
+  ##############################
+  frontend-internal:
+    build:
+      context: ../frontend/frontend-gaming-master-internal
+      dockerfile: Dockerfile
+    container_name: frontend-internal
+    ports:
+      - "5000:80"   # Direct access port 5000
+    restart: always
+    networks:
+      - web
+
+  ##############################
+  # Spring Boot Backend API
+  ##############################
+  backend-api:
+    build:
+      context: ../backend/backend-gaming-master-restful-api
+      dockerfile: Dockerfile
+    container_name: backend-api
+    ports:
+      - "8090:8090"   # เปลี่ยนจาก expose เป็น ports
+    environment:
+      - SPRING_PROFILES_ACTIVE=prod
+    restart: always
+    networks:
+      - web
+
+  ##############################
+  # RTMP Live Stream Server (Node Media Server)
+  ##############################
+  backend-live-api:
+    build:
+      context: ../backend/backend-gaming-master-live-api
+      dockerfile: Dockerfile
+    container_name: backend-live-api
+    ports:
+      - "1935:1935"   # RTMP
+      - "8080:8080"   # HTTP Streaming
+      - "3000:3000"   # API & WebRTC
+    restart: always
+    networks:
+      - web
+
+  ##############################
+  # Nginx Reverse Proxy
+  ##############################
+  nginx:
+    image: nginx:alpine
+    container_name: nginx
+    ports:
+      - "80:80"
+      - "8081:8081"   # เปลี่ยนจาก 5000 เป็น 8081
+    volumes:
+      - ./nginx/sites-available:/etc/nginx/conf.d
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+    restart: always
+    networks:
+      - web
+    depends_on:
+      - frontend-ssr
+      - frontend-internal
+
+networks:
+  web:
+    driver: bridge
