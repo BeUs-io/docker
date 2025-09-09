@@ -1,4 +1,288 @@
 services:
+  ##############################
+  # Authorization Server
+  ##############################
+  authorizationserver:
+    build:
+      context: ../backend/authorizationserver
+      dockerfile: Dockerfile
+    container_name: authorizationserver
+    restart: unless-stopped
+    environment:
+      ISSUER_URI: "http://18.142.185.25:8080/authorization"
+      # ถ้าเปิดสู่ภายนอกผ่านโดเมน/IP ให้ใช้แบบนี้แทน:
+      # ISSUER_URI: "http://<โดเมนหรือ IP ของคุณ>/authorization"
+      SERVER_PORT: "9001"
+      SPRING_PROFILES_ACTIVE: "dev"
+      USER_NAME: "admin"
+      PASSWORD: "letmein"
+      EUREKA_HOSTNAME: "discoveryservice"
+      SPRING_APPLICATION_NAME: "authorizationserver"
+      # ⬇️ ใส่เช่นกัน ให้ลงทะเบียนกับ discoveryservice
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: "http://admin:letmein@discoveryservice:5002/eureka/"
+      
+      # ⬇️ DB ที่ Auth ใช้ (เอาค่าเดียวกับ postgres service ที่คุณมีอยู่)
+      POSTGRES_HOST: "postgres"
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: "${LOCAL_POSTGRES_DB}"
+      POSTGRES_USERNAME: "${LOCAL_POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${LOCAL_POSTGRES_PASSWORD}"
+        
+    depends_on:
+      discoveryservice:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks: [web]
+
+  ##############################
+  # Gateway
+  ##############################
+  gateway:
+    build:
+      context: ../backend/gateway
+      dockerfile: Dockerfile
+    container_name: gateway
+    restart: unless-stopped
+    ports:
+      - "8080:8080"        # ← เปลี่ยนมาใช้ 8080 บน host
+    environment:
+      SPRING_PROFILES_ACTIVE: "dev"
+      SERVER_PORT: "8080"
+      USER_NAME: "admin"
+      PASSWORD: "letmein"
+      EUREKA_HOSTNAME: "discoveryservice"
+      JWKS_URI: "http://authorizationserver:9001/oauth2/jwks"
+      
+      # ⬇️ สำคัญ: บังคับให้ eureka client ชี้ discoveryservice (ไม่ใช่ localhost)
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: "http://admin:letmein@discoveryservice:5002/eureka/"
+    depends_on:
+      discoveryservice:
+        condition: service_healthy
+      authorizationserver:
+        condition: service_started
+    networks: [web]
+
+  ##############################
+  # Discoveryservice
+  ##############################
+  discoveryservice:
+    build:
+      context: ../backend/discoveryserver
+      dockerfile: Dockerfile
+    container_name: discoveryservice
+    restart: unless-stopped
+    ports:
+      - "5002:5002"
+    environment:
+      SERVER_PORT: "5002"
+      SPRING_PROFILES_ACTIVE: "dev"
+      USER_NAME: "admin"
+      PASSWORD: "letmein"
+      EUREKA_HOSTNAME: "discoveryservice"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://$${USER_NAME}:$${PASSWORD}@localhost:5002/eureka/apps | grep -q '<applications>'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks: [web]
+
+  ##############################
+  # Kafka (Zookeeper-less)
+  ##############################
+  kafka:
+    image: bitnami/kafka:3.7
+    container_name: kafka
+    environment:
+      KAFKA_ENABLE_KRAFT: "yes"
+      KAFKA_CFG_PROCESS_ROLES: controller,broker
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CFG_NODE_ID: 1
+    networks: [web]
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  ##############################
+  # Userservice (production)
+  ##############################
+  userservice:
+    build:
+      context: ../backend/userservice
+      dockerfile: Dockerfile
+    container_name: userservice
+    ports:
+      - "8085:8085"
+    environment:
+      # ----- Spring / Profile -----
+      SPRING_PROFILES_ACTIVE: "dev"
+      SERVER_PORT: 8085
+
+      # ----- Database -----
+      POSTGRES_HOST: "postgres"
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: "${LOCAL_POSTGRES_DB}"
+      POSTGRES_USERNAME: "${LOCAL_POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${LOCAL_POSTGRES_PASSWORD}"
+
+      # ----- Kafka -----
+      KAFKA_SERVER_URL: kafka:9092
+
+      # ----- Service Discovery (Eureka) -----
+      USER_NAME: "admin"
+      PASSWORD: "letmein"
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: "http://admin:letmein@discoveryservice:5002/eureka/"
+
+      # ----- UI / JWKS / Keys (ถ้ามี) -----
+      UI_APP_URL: http://18.142.185.25:3000
+      JWKS_URI: http://authorizationserver:9001/oauth2/jwks
+      PRIVATE_KEY: classpath:keys/private.key
+      PUBLIC_KEY: classpath:keys/public.key
+    depends_on:
+      postgres:
+        condition: service_healthy
+      discoveryservice:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks: [web]
+
+  ##############################
+  # Ticketservice (production)
+  ##############################
+
+  ticketservice:
+    build:
+      context: ../backend/ticketservice
+      dockerfile: Dockerfile
+    container_name: ticketservice
+    restart: unless-stopped
+    ports:
+      - "8086:8086"
+    environment:
+      SPRING_PROFILES_ACTIVE: "dev"
+      POSTGRES_HOST: "postgres"
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: "${LOCAL_POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${LOCAL_POSTGRES_PASSWORD}"
+      POSTGRES_DB: "${LOCAL_POSTGRES_DB}"
+      KAFKA_SERVER_URL: "kafka:9092"
+      USER_NAME: "admin"
+      PASSWORD: "letmein"
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: "http://admin:letmein@discoveryservice:5002/eureka/"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+      discoveryservice:
+        condition: service_healthy
+    networks: [web]
+
+  ##############################
+  # Notificationservice (production)
+  ##############################
+
+  notificationservice:
+    build:
+      context: ../backend/notificationservice
+      dockerfile: Dockerfile
+    container_name: notificationservice
+    restart: unless-stopped
+    environment:
+      # Spring
+      SPRING_PROFILES_ACTIVE: "dev"
+      SERVER_PORT: "9013"
+      SPRING_APPLICATION_NAME: "notificationservice"
+
+      # Eureka
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: "http://admin:letmein@discoveryservice:5002/eureka/"
+
+      # Kafka
+      KAFKA_SERVER_URL: "kafka:9092"
+
+      # Postgres (ถ้าใช้)
+      POSTGRES_HOST: "postgres"
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: "${LOCAL_POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${LOCAL_POSTGRES_PASSWORD}"
+      POSTGRES_DB: "${LOCAL_POSTGRES_DB}"
+
+      # Email/SMTP (ถ้าใช้)
+      EMAIL_ENABLED: "${EMAIL_ENABLED:-false}"
+      EMAIL_FROM: "${EMAIL_FROM:-no-reply@example.com}"
+      SMTP_HOST: "${SMTP_HOST:-smtp}"
+      SMTP_PORT: "${SMTP_PORT:-1025}"
+      SMTP_USERNAME: "${SMTP_USERNAME:-}"
+      SMTP_PASSWORD: "${SMTP_PASSWORD:-}"
+    ports:
+      - "9013:9013"
+    depends_on:
+      discoveryservice:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9013/actuator/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 20
+    networks: [web]
+
+  ##############################
+  # PostgreSQL (production)
+  ##############################
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${LOCAL_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${LOCAL_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${LOCAL_POSTGRES_DB}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # The schema.sql will only run the first time the volume is created.
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks: [web]
+
+  ##############################
+  # pgAdmin
+  ##############################
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD}
+      PGADMIN_LISTEN_PORT: 6000
+      TZ: Asia/Bangkok
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "5050:6000"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    networks: [web]
 
   ##############################
   # Frontend SSR (Angular)
@@ -11,8 +295,7 @@ services:
     ports:
       - "4000:4000"
     restart: always
-    networks:
-      - web
+    networks: [web]
 
   ##############################
   # Frontend Internal (Static SPA)
@@ -23,29 +306,28 @@ services:
       dockerfile: Dockerfile
     container_name: frontend-internal
     ports:
-      - "5000:80"   # Direct access port 5000
+      - "5000:80"   # เข้าผ่าน http://<IP>:5000/admin/
     restart: always
-    networks:
-      - web
+    networks: [web]
 
   ##############################
-  # Spring Boot Backend API
+  # Ticket App (SPA)
   ##############################
-  backend-api:
+  ticketapp:
     build:
-      context: ../backend/backend-gaming-master-restful-api
+      context: ../frontend/ticketapp        # จากโฟลเดอร์ docker ไปยัง ../ticketapp
       dockerfile: Dockerfile
-    container_name: backend-api
+      args:
+        CONFIG: production         # เปลี่ยนเป็น staging ได้
+    container_name: ticketapp
+    restart: unless-stopped
     ports:
-      - "8090:8090"   # เปลี่ยนจาก expose เป็น ports
-    environment:
-      - SPRING_PROFILES_ACTIVE=prod
-    restart: always
-    networks:
-      - web
+      - "3001:80"                  # เปิดที่เครื่อง:3001 -> ในคอนเทนเนอร์:80
+      - "3003:3003"
+    networks: [web]                # ถ้าใช้ network 'web' เหมือน services อื่น ๆ
 
   ##############################
-  # RTMP Live Stream Server (Node Media Server)
+  # RTMP Live Stream Server
   ##############################
   backend-live-api:
     build:
@@ -53,12 +335,11 @@ services:
       dockerfile: Dockerfile
     container_name: backend-live-api
     ports:
-      - "1935:1935"   # RTMP
-      - "8080:8080"   # HTTP Streaming
-      - "3000:3000"   # API & WebRTC
+      - "1935:1935"
+      - "8082:8080"
+      - "3000:3000"
     restart: always
-    networks:
-      - web
+    networks: [web]
 
   ##############################
   # Nginx Reverse Proxy
@@ -68,17 +349,22 @@ services:
     container_name: nginx
     ports:
       - "80:80"
-      - "8081:8081"   # เปลี่ยนจาก 5000 เป็น 8081
+
     volumes:
       - ./nginx/sites-available:/etc/nginx/conf.d
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf
     restart: always
-    networks:
-      - web
+    networks: [web]
     depends_on:
       - frontend-ssr
       - frontend-internal
+    # - pgadmin                  # ✅ เพิ่มบรรทัดนี้
+
+volumes:
+  postgres_data:
+  pgadmin_data:
 
 networks:
   web:
+    name: docker_web
     driver: bridge

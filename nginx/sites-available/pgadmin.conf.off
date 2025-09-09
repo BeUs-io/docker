@@ -1,0 +1,13 @@
+server {
+    listen 80;
+    server_name 18.142.185.25;
+
+    client_max_body_size 100M;
+
+    location /pgAdmin/ {
+    proxy_set_header X-Script-Name /pgAdmin;
+    proxy_set_header X-Scheme $scheme;
+    proxy_set_header Host $host;
+    proxy_pass http://pgadmin:80/;   # มี / ท้าย
+    }
+}

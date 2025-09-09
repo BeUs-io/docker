@@ -1,4 +1,4 @@
-version: "3.9"
+# gaming-master/docker/compose-postgres.yml
 
 networks:
   dbnet:
@@ -10,9 +10,9 @@ services:
     container_name: postgrecontainer
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DATABASE}
+      POSTGRES_USER: ${LOCAL_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${LOCAL_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${LOCAL_POSTGRES_DB}
       TZ: Asia/Bangkok
       PGTZ: Asia/Bangkok
     ports:
@@ -42,7 +42,7 @@ services:
       postgresdb:
         condition: service_healthy
     ports:
-      - "7000:6000"
+      - "5050:6000"
     volumes:
       - pgadminvolume:/var/lib/pgadmin
     networks: [dbnet]

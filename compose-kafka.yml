@@ -1,7 +1,8 @@
-# compose-kafka.yml
-# ไม่มี version: แล้ว
+# compose-kafka.yml  (ไม่มี key "version")
 networks:
   kafkanet: {}
+  web:
+    name: docker_web
 
 volumes:
   zk-data: {}
@@ -13,7 +14,7 @@ services:
     container_name: zookeeper
     restart: unless-stopped
     ports:
-      - "2181:2181"
+      - "2181:2181"   # ชั่วคราว เปิดไว้สำหรับดีบัก (ปิดทีหลังได้)
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
@@ -39,19 +40,25 @@ services:
     depends_on:
       zookeeper:
         condition: service_healthy
+    # เปิดทั้งพอร์ตภายในและภายนอก
     ports:
-      - "9092:9092"
+      - "9092:9092"   # client นอกเครื่อง (ชั่วคราว)
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      # สอง listener: ภายนอก (PLAINTEXT) และภายใน docker (PLAINTEXT_INTERNAL)
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_INTERNAL://kafka:29092
+      # !! สำคัญ: ใช้ IP เครื่องจริง แทน localhost
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://18.142.185.25:9092,PLAINTEXT_INTERNAL://kafka:29092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_INTERNAL://0.0.0.0:29092
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
     networks:
       - kafkanet
+      - web          # << join network ของสแต็กหลัก เพื่อให้ service อื่นเรียก 'kafka' ได้
 
   kafdrop:
     image: obsidiandynamics/kafdrop:4.0.2
@@ -60,30 +67,10 @@ services:
     depends_on:
       - kafka
     ports:
-      - "9000:9000"
+      - "9000:9000"   # UI
     environment:
-      KAFKA_BROKERCONNECT: "kafka:29092"
+      KAFKA_BROKERCONNECT: "kafka:29092"   # ใช้ชื่อ service ภายใน
       JVM_OPTS: "-Xms32M -Xmx64M"
     networks:
       - kafkanet
-
-
-
-
-
-
-# docker compose -f ./compose-kafka.yml up -d
-# start service
-
-# docker compose -f compose-kafka.yml up -d
-
-# เข้าไปเช็ค log
-
-# docker logs kafka -f
-# docker logs zookeeper -f
-
-# ทดสอบ producer/consumer
-
-# docker exec -it kafka bash
-# kafka-topics --bootstrap-server localhost:9092 --create --topic test --partitions 1 --replication-factor 1
-# kafka-console-producer --broker-list localhost:9092 --topic test
+      - web
