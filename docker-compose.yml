@@ -34,6 +34,9 @@ services:
       postgres:
         condition: service_healthy
     networks: [web]
+    ports:
+      - "9001:9001"   # ⬅️ เพิ่มอันนี้   # ⬅️ เพิ่มอันนี้
+
 
   ##############################
   # Gateway
@@ -211,7 +214,7 @@ services:
       # Postgres (ถ้าใช้)
       POSTGRES_HOST: "postgres"
       POSTGRES_PORT: "5432"
-      POSTGRES_USER: "${LOCAL_POSTGRES_USER}"
+      POSTGRES_USERNAME: "${LOCAL_POSTGRES_USER}"
       POSTGRES_PASSWORD: "${LOCAL_POSTGRES_PASSWORD}"
       POSTGRES_DB: "${LOCAL_POSTGRES_DB}"
 
@@ -236,6 +239,7 @@ services:
       interval: 15s
       timeout: 3s
       retries: 20
+      start_period: 60s
     networks: [web]
 
   ##############################
@@ -254,7 +258,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       # The schema.sql will only run the first time the volume is created.
-      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+      - ./backend/authorizationserver/src/main/resources/data/schema.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
