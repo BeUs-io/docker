@@ -1,38 +1,57 @@
-# compose-kafka.yml  (ไม่มี key "version")
+##############################
+# NETWORKS & VOLUMES
+##############################
 networks:
-  kafkanet: {}
+  kafkanet:
+    external: true
+    name: docker_kafkanet
+    driver: bridge
   web:
+    external: true
     name: docker_web
+    driver: bridge
 
 volumes:
-  zk-data: {}
-  zk-logs: {}
+  pgdata:
+  pgadmin_data:
+  kfkdata:
+  zk-data:
+  zk-logs:
+
+##############################
+# SERVICES
+##############################
 
 services:
+  # ==========================
+  # Infra: Zookeeper
+  # ==========================
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
     container_name: zookeeper
     restart: unless-stopped
-    ports:
-      - "2181:2181"   # ชั่วคราว เปิดไว้สำหรับดีบัก (ปิดทีหลังได้)
+    networks: [kafkanet]
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
       ZOOKEEPER_SYNC_LIMIT: 2
       ZOOKEEPER_INIT_LIMIT: 10
       KAFKA_OPTS: "-Dzookeeper.4lw.commands.whitelist=ruok,stat,srvr,mntr,conf"
+    ports:
+      - "2181:2181"
     volumes:
       - zk-data:/var/lib/zookeeper/data
       - zk-logs:/var/lib/zookeeper/log
     healthcheck:
-      test: ["CMD-SHELL", "echo ruok | nc -w 2 127.0.0.1 2181 | grep imok || exit 1"]
+      test: ["CMD-SHELL", "echo ruok | nc -w 2 127.0.0.1 2181 | grep -q imok"]
       interval: 10s
       timeout: 5s
-      retries: 12
-      start_period: 30s
-    networks:
-      - kafkanet
+      retries: 20
+      start_period: 20s
 
+  # ==========================
+  # Infra: Kafka
+  # ==========================
   kafka:
     image: confluentinc/cp-kafka:7.5.0
     container_name: kafka
@@ -40,37 +59,54 @@ services:
     depends_on:
       zookeeper:
         condition: service_healthy
-    # เปิดทั้งพอร์ตภายในและภายนอก
-    ports:
-      - "9092:9092"   # client นอกเครื่อง (ชั่วคราว)
+    networks: [kafkanet, web]
     environment:
+      KAFKA_EXTERNAL_IP: "18.142.185.25"
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      # สอง listener: ภายนอก (PLAINTEXT) และภายใน docker (PLAINTEXT_INTERNAL)
+
+      # 2 listeners: external (9092) + internal (29092)
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
-      # !! สำคัญ: ใช้ IP เครื่องจริง แทน localhost
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://18.142.185.25:9092,PLAINTEXT_INTERNAL://kafka:29092
       KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_INTERNAL://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://${KAFKA_EXTERNAL_IP:-127.0.0.1}:9092,PLAINTEXT_INTERNAL://kafka:29092
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-    networks:
-      - kafkanet
-      - web          # << join network ของสแต็กหลัก เพื่อให้ service อื่นเรียก 'kafka' ได้
+    ports:
+      - "9092:9092"  # ทดสอบจาก host ภายนอก; ภายใน container ใช้ kafka:29092
+    volumes:
+      - kfkdata:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 9092 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
 
+  # ==========================
+  # Infra: Kafdrop (Kafka UI)
+  # ==========================
   kafdrop:
     image: obsidiandynamics/kafdrop:4.0.2
     container_name: kafdrop
     restart: unless-stopped
     depends_on:
-      - kafka
-    ports:
-      - "9000:9000"   # UI
+      kafka:
+        condition: service_healthy
+    networks: [kafkanet, web]
     environment:
-      KAFKA_BROKERCONNECT: "kafka:29092"   # ใช้ชื่อ service ภายใน
+      KAFKA_BROKERCONNECT: kafka:29092
       JVM_OPTS: "-Xms32M -Xmx64M"
-    networks:
-      - kafkanet
-      - web
+    ports:
+      - "9000:9000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9000 | grep -q '<title>Kafdrop'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+# docker compose -f ./compose-kafka.yml up -d
+# docker compose -f ./compose-kafka.yml ps

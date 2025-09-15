@@ -1,21 +1,38 @@
+name: gaming-master
+
+x-health-postgres: &health_postgres
+  test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-appdb} -h localhost -p 5432"]
+  interval: 5s
+  timeout: 3s
+  retries: 20
+  start_period: 10s
+
+x-health-tcp: &health_tcp
+  test: ["CMD-SHELL", "nc -z localhost $${HEALTH_PORT:-8080} || exit 1"]
+  interval: 10s
+  timeout: 5s
+  retries: 20
+  start_period: 20s
 
 ##############################
 # NETWORKS & VOLUMES
 ##############################
 networks:
-  web:
-    name: docker_web
-    driver: bridge
   kafkanet:
+    external: true
+    name: docker_kafkanet
+    driver: bridge
+  web:
+    external: true
+    name: docker_web
     driver: bridge
 
 volumes:
   pgdata:
   pgadmin_data:
-  zkdata:
+  kfkdata:
   zk-data:
   zk-logs:
-  kfkdata:
 
 ##############################
 # SERVICES
@@ -25,58 +42,55 @@ services:
   # Infra: PostgreSQL
   # ==========================
   postgres:
+    profiles: ["infra", "bootstrap", "app"]
     image: postgres:16
     container_name: postgres
     restart: unless-stopped
-    networks: [web]
+
     environment:
-      POSTGRES_USER: ${LOCAL_POSTGRES_USER}
-      POSTGRES_PASSWORD: ${LOCAL_POSTGRES_PASSWORD}
-      POSTGRES_DB: ${LOCAL_POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
       TZ: Asia/Bangkok
-    ports:
-      - "127.0.0.1:5432:5432"
+
+    ports: ["5432:5432"]
+    healthcheck: *health_postgres
     volumes:
       - pgdata:/var/lib/postgresql/data
-      # รันครั้งแรกเท่านั้น (init schema ของ auth ถ้ามี)
-      - ./backend/authorizationserver/src/main/resources/data/schema.sql:/docker-entrypoint-initdb.d/init.sql:ro
-      - ./backend/authorizationserver/src/main/resources/data/seed.sql:/docker-entrypoint-initdb.d/seed.sql:ro
-    healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
+
+    networks: [web]
 
   # ==========================
-  # pgAdmin
+  # Infra: pgAdmin
   # ==========================
   pgadmin:
+    profiles: ["infra", "bootstrap"]
     image: dpage/pgadmin4:latest
     container_name: pgadmin
     restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks: [web]
+
     environment:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL}
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD}
       PGADMIN_LISTEN_PORT: 6000
       TZ: Asia/Bangkok
-    ports:
-      - "5050:6000"
+    ports: ["5050:6000"]
     volumes:
       - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      postgres:
+          condition: service_healthy
+    networks: [web]
 
   # ==========================
   # Infra: Zookeeper
   # ==========================
   zookeeper:
+    profiles: ["infra", "app"]
     image: confluentinc/cp-zookeeper:7.5.0
     container_name: zookeeper
     restart: unless-stopped
-    networks: [kafkanet]
+
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
@@ -86,7 +100,6 @@ services:
     ports:
       - "2181:2181"
     volumes:
-      - zkdata:/var/lib/zookeeper/data
       - zk-data:/var/lib/zookeeper/data
       - zk-logs:/var/lib/zookeeper/log
     healthcheck:
@@ -95,11 +108,13 @@ services:
       timeout: 5s
       retries: 20
       start_period: 20s
+    networks: [kafkanet]
 
   # ==========================
-  # Infra: Kafka (single-broker dev)
+  # Infra: Kafka
   # ==========================
   kafka:
+    profiles: ["infra", "app"]
     image: confluentinc/cp-kafka:7.5.0
     container_name: kafka
     restart: unless-stopped
@@ -107,24 +122,23 @@ services:
       zookeeper:
         condition: service_healthy
     networks: [kafkanet, web]
-    environment:
-      KAFKA_EXTERNAL_IP: "18.142.185.25"
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-
-      # 2 listeners: external (9092) + internal (29092)
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_INTERNAL://0.0.0.0:29092
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://${KAFKA_EXTERNAL_IP:-127.0.0.1}:9092,PLAINTEXT_INTERNAL://kafka:29092
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
-
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
     ports:
-      - "9092:9092"  # ทดสอบจาก host ภายนอก; ภายใน container ใช้ kafka:29092
+      - "9092:9092"
     volumes:
       - kfkdata:/var/lib/kafka/data
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_INTERNAL://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://${KAFKA_EXTERNAL_IP:-18.142.185.25}:9092,PLAINTEXT_INTERNAL://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
     healthcheck:
       test: ["CMD-SHELL", "nc -z localhost 9092 || exit 1"]
       interval: 10s
@@ -132,17 +146,16 @@ services:
       retries: 20
       start_period: 30s
 
+
   # ==========================
   # Infra: Kafdrop (Kafka UI)
   # ==========================
   kafdrop:
+    profiles: ["infra"]
     image: obsidiandynamics/kafdrop:4.0.2
     container_name: kafdrop
     restart: unless-stopped
-    depends_on:
-      kafka:
-        condition: service_healthy
-    networks: [kafkanet, web]
+
     environment:
       KAFKA_BROKERCONNECT: kafka:29092
       JVM_OPTS: "-Xms32M -Xmx64M"
@@ -154,11 +167,48 @@ services:
       timeout: 5s
       retries: 12
       start_period: 20s
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks: [kafkanet, web]
+  
+  
+  # ===========================================================
+  # BOOTSTRAP / SEED (profiles: bootstrap)
+  # ===========================================================
+  db-bootstrapper:
+    profiles: ["bootstrap"]
+    image: postgres:16
+    depends_on:
+      postgres:
+        condition: service_healthy
 
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    working_dir: /work
+    volumes:
+      - ./schema:/work/schema:ro
+
+    entrypoint: [ "bash", "-lc" ]
+    command: >
+          "
+          set -e;
+          echo '>> Applying schema...';
+          psql -h postgres -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-appdb} -f schema/00-init.sql;
+          psql -h postgres -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-appdb} -f schema/10-tables.sql;
+          psql -h postgres -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-appdb} -f schema/20-seed.sql;
+          echo '>> Seed completed';
+          "
+    networks: [web]
   # ==========================
-  # Discovery Service (Eureka)
+  # App: Discovery Service (Eureka)
   # ==========================
   discoveryservice:
+    profiles: ["app"]
     build:
       context: ../backend/discoveryserver
       dockerfile: Dockerfile
@@ -173,16 +223,19 @@ services:
       USER_NAME: "admin"
       PASSWORD: "letmein"
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:5002/actuator/health | grep -q '\"status\":\"UP\"' && curl -fsS http://$${USER_NAME}:$${PASSWORD}@localhost:5002/eureka/apps >/dev/null"]
+      test: ["CMD-SHELL", "exit 0"]
       interval: 10s
       timeout: 5s
       retries: 12
       start_period: 20s
 
+
+
   # ==========================
-  # Authorization Server
+  # App: Authorization Server
   # ==========================
   authorizationserver:
+    profiles: ["app"]
     build:
       context: ../backend/authorizationserver
       dockerfile: Dockerfile
@@ -195,34 +248,36 @@ services:
         condition: service_healthy
     networks: [web]
     ports:
-      - "9001:9001"
+      - "9001:8080"
     environment:
-      SERVER_PORT: "9001"
+      SERVER_PORT: "8080"
       SPRING_PROFILES_ACTIVE: "dev"
       SPRING_APPLICATION_NAME: "authorizationserver"
       EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: "http://admin:letmein@discoveryservice:5002/eureka/"
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: "http://authorizationserver:9001/authorization"
 
-      # IMPORTANT: ใช้ค่าเดียวกับที่ Gateway ตรวจ (ตอนนี้ใช้ IP ภายนอกผ่าน path /authorization)
-      ISSUER_URI: "http://18.142.185.25:8080/authorization"
-
-      # DB ของ Auth
-      POSTGRES_HOST: "postgres"
-      POSTGRES_PORT: "5432"
-      POSTGRES_DB: "${LOCAL_POSTGRES_DB}"
-      POSTGRES_USERNAME: "${LOCAL_POSTGRES_USER}"
-      POSTGRES_PASSWORD: "${LOCAL_POSTGRES_PASSWORD}"
+      # ใช้ค่าจาก .env
+      ISSUER_URI: "${ISSUER_URI}"
+      SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/${LOCAL_POSTGRES_DB}"
+      SPRING_DATASOURCE_USERNAME: "${LOCAL_POSTGRES_USER}"
+      SPRING_DATASOURCE_PASSWORD: "${LOCAL_POSTGRES_PASSWORD}"
+      SPRING_JPA_HIBERNATE_DDL_AUTO: "update"
+      SPRING_JPA_SHOW_SQL: "false"
+      SPRING_JPA_PROPERTIES_HIBERNATE_DIALECT: "org.hibernate.dialect.PostgreSQLDialect"
       TZ: Asia/Bangkok
+      
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:9001/actuator/health | grep -q '\"status\":\"UP\"'"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/authorization/actuator/health | grep -q '\"status\":\"UP\"'"]
       interval: 10s
       timeout: 5s
       retries: 30
       start_period: 40s
 
   # ==========================
-  # User Service
+  # App: User Service
   # ==========================
   userservice:
+    profiles: ["app"]
     build:
       context: ../backend/userservice
       dockerfile: Dockerfile
@@ -244,28 +299,31 @@ services:
       SPRING_PROFILES_ACTIVE: "dev"
       SERVER_PORT: "8085"
       EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: "http://admin:letmein@discoveryservice:5002/eureka/"
-      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: "http://18.142.185.25:8080/authorization"
-      POSTGRES_HOST: "postgres"
-      POSTGRES_PORT: "5432"
-      POSTGRES_DB: "${LOCAL_POSTGRES_DB}"
-      POSTGRES_USERNAME: "${LOCAL_POSTGRES_USER}"
-      POSTGRES_PASSWORD: "${LOCAL_POSTGRES_PASSWORD}"
+
+      # sync กับ .env
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: "${ISSUER_URI}"
+
+      SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/${LOCAL_POSTGRES_DB}"
+      SPRING_DATASOURCE_USERNAME: "${LOCAL_POSTGRES_USER}"
+      SPRING_DATASOURCE_PASSWORD: "${LOCAL_POSTGRES_PASSWORD}"
+
       KAFKA_SERVER_URL: "kafka:29092"
-      UI_APP_URL: "http://18.142.185.25:3001"
-      JWKS_URI: "http://18.142.185.25:8080/authorization/oauth2/jwks"
+      UI_APP_URL: ${UI_APP_URL}
+      JWKS_URI: "http://18.142.185.25:9001/authorization/oauth2/jwks"
       TZ: Asia/Bangkok
 
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8085/actuator/health | grep -q '\"status\":\"UP\"'"]
+      test: ["CMD-SHELL", "exit 0"]
       interval: 10s
       timeout: 5s
       retries: 12
       start_period: 30s
 
   # ==========================
-  # Ticket Service
+  # App: Ticket Service
   # ==========================
   ticketservice:
+    profiles: ["app"]
     build:
       context: ../backend/ticketservice
       dockerfile: Dockerfile
@@ -286,28 +344,36 @@ services:
     environment:
       SPRING_PROFILES_ACTIVE: "dev"
       EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: "http://admin:letmein@discoveryservice:5002/eureka/"
-      # สำคัญ: ให้ตรงกับ ISSUER_URI ของ auth (ข้างบน)
-      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: "http://18.142.185.25:8080/authorization"
+
+      UI_APP_URL: ${UI_APP_URL}
+
       # DB
-      POSTGRES_HOST: "postgres"
-      POSTGRES_PORT: "5432"
-      POSTGRES_DB: "${LOCAL_POSTGRES_DB}"
-      POSTGRES_USERNAME: "${LOCAL_POSTGRES_USER}"
-      POSTGRES_PASSWORD: "${LOCAL_POSTGRES_PASSWORD}"
+      SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/${LOCAL_POSTGRES_DB}"
+      SPRING_DATASOURCE_USERNAME: "${LOCAL_POSTGRES_USER}"
+      SPRING_DATASOURCE_PASSWORD: "${LOCAL_POSTGRES_PASSWORD}"
+
       # Kafka
-      KAFKA_SERVER_URL: "kafka:29092"
+      KAFKA_SERVER_URL: "kafka:9092"
+
+      # ใช้ internal issuer (ต้อง match กับ iss ของ Authorization Server)
+      # sync กับ .env
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: "${ISSUER_URI}"
+
       TZ: Asia/Bangkok
+
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8086/actuator/health | grep -q '\"status\":\"UP\"'"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:8086/actuator/health | grep -q '\"status\":\"UP\"'"]
       interval: 10s
       timeout: 5s
       retries: 12
-      start_period: 30s
+      start_period: 40s
+
 
   # ==========================
-  # Notification Service (Kafka consumer)
+  # App: Notification Service (Kafka consumer)
   # ==========================
   notificationservice:
+    profiles: ["app"]
     build:
       context: ../backend/notificationservice
       dockerfile: Dockerfile
@@ -330,12 +396,11 @@ services:
       SERVER_PORT: "9013"
       SPRING_APPLICATION_NAME: "notificationservice"
       EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: "http://admin:letmein@discoveryservice:5002/eureka/"
-      # สำคัญ: ให้ตรงกับ ISSUER_URI ของ auth (ข้างบน)
-      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: "http://18.142.185.25:8080/authorization"
-      # Kafka
+      
+      # sync กับ .env
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: "${ISSUER_URI}"
       KAFKA_SERVER_URL: "kafka:29092"
       NOTIFICATION_TOPIC: "NOTIFICATION_TOPIC"
-      # DB (ถ้าใช้)
       POSTGRES_HOST: "postgres"
       POSTGRES_PORT: "5432"
       POSTGRES_DB: "${LOCAL_POSTGRES_DB}"
@@ -350,9 +415,10 @@ services:
       start_period: 30s
 
   # ==========================
-  # API Gateway
+  # App: API Gateway
   # ==========================
   gateway:
+    profiles: ["app"]
     build:
       context: ../backend/gateway
       dockerfile: Dockerfile
@@ -363,33 +429,35 @@ services:
         condition: service_healthy
       authorizationserver:
         condition: service_healthy
-      userservice:
-        condition: service_healthy
-      ticketservice:
-        condition: service_healthy
     networks: [web]
     ports:
       - "8080:8080"
     environment:
       SPRING_PROFILES_ACTIVE: "dev"
       SERVER_PORT: "8080"
+      SPRING_APPLICATION_NAME: "gateway"
+
+      # Eureka
       EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: "http://admin:letmein@discoveryservice:5002/eureka/"
-      # IMPORTANT: ใช้ค่าเดียวกับที่ Gateway ตรวจ (ตอนนี้ใช้ IP ภายนอกผ่าน path /authorization)
-      ISSUER_URI: "http://18.142.185.25:8080/authorization"
-      # สำคัญ: ให้ตรงกับ ISSUER_URI ของ auth (ข้างบน)
-      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: "http://18.142.185.25:8080/authorization"
+      EUREKA_HOSTNAME: "gateway"
+
+      # ✅ sync
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: "${ISSUER_URI}"
+      ISSUER_URI: "${ISSUER_URI}"
+
       TZ: Asia/Bangkok
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health | grep -q '\"status\":\"UP\"'"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/actuator/health | grep -q '\"status\":\"UP\"'"]
       interval: 10s
       timeout: 5s
       retries: 12
       start_period: 30s
 
   # ==========================
-  # Frontend SSR (Angular)
+  # App: Frontend SSR (Angular)
   # ==========================
   frontend-ssr:
+    profiles: ["app"]
     build:
       context: ../frontend/frontend-gaming-master-public
       dockerfile: Dockerfile
@@ -400,9 +468,10 @@ services:
       - "4000:4000"
 
   # ==========================
-  # Frontend Internal (Static SPA)
+  # App: Frontend Internal (Static SPA)
   # ==========================
   frontend-internal:
+    profiles: ["app"]
     build:
       context: ../frontend/frontend-gaming-master-internal
       dockerfile: Dockerfile
@@ -410,12 +479,13 @@ services:
     restart: always
     networks: [web]
     ports:
-      - "5000:80"   # http://<IP>:5000/admin/
+      - "5000:80"
 
   # ==========================
-  # Ticket App (SPA)
+  # App: Ticket App (SPA)
   # ==========================
   ticketapp:
+    profiles: ["app"]
     build:
       context: ../frontend/ticketapp
       dockerfile: Dockerfile
@@ -429,9 +499,10 @@ services:
       - "3003:3003"
 
   # ==========================
-  # RTMP Live Stream Server
+  # App: RTMP Live Stream Server
   # ==========================
   backend-live-api:
+    profiles: ["app"]
     build:
       context: ../backend/backend-gaming-master-live-api
       dockerfile: Dockerfile
@@ -444,9 +515,10 @@ services:
       - "3000:3000"
 
   # ==========================
-  # Nginx Reverse Proxy
+  # App: Nginx Reverse Proxy
   # ==========================
   nginx:
+    profiles: ["app"]
     image: nginx:alpine
     container_name: nginx
     restart: always
@@ -459,3 +531,24 @@ services:
     volumes:
       - ./nginx/sites-available:/etc/nginx/conf.d
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+
+
+# ลำดับการ RUN (ชัดเจนทีละเฟส)
+
+# 1. INFRA ก่อน
+# docker compose --profile infra up -d --build
+# docker compose up -d --no-deps --build pgadmin
+# docker compose ps
+
+# 2. BOOTSTRAP (หนึ่ง-ช็อต)
+# docker compose --profile bootstrap up --build --abort-on-container-exit db-bootstrapper
+# # รันจบแล้ว container db-seed จะ exit 0 (สำเร็จ)
+
+# 3. APP
+# docker compose --profile app up -d --build
+# docker compose ps
+
+
+## ถ้าจะ reset ข้อมูล (dev):
+## docker compose down -v
+## docker volume rm gaming-master_pgdata
