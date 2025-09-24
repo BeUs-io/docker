@@ -75,12 +75,14 @@ services:
       PGADMIN_LISTEN_PORT: 6000
       TZ: Asia/Bangkok
     ports: ["5050:6000"]
-    volumes:
-      - pgadmin_data:/var/lib/pgadmin
+
     depends_on:
       postgres:
           condition: service_healthy
     networks: [web]
+
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
 
   # ==========================
   # Infra: Zookeeper
@@ -204,6 +206,23 @@ services:
           echo '>> Seed completed';
           "
     networks: [web]
+
+  # ==========================
+  # App: Ticket App (SPA)
+  # ==========================
+  ticketapp:
+    profiles: ["app"]
+    build:
+      context: ../frontend/ticketapp
+      dockerfile: Dockerfile
+      args:
+        CONFIG: production
+    container_name: ticketapp
+    restart: unless-stopped
+    networks: [web]
+    ports:
+      - "3001:80"
+      
   # ==========================
   # App: Discovery Service (Eureka)
   # ==========================
@@ -229,8 +248,6 @@ services:
       retries: 12
       start_period: 20s
 
-
-
   # ==========================
   # App: Authorization Server
   # ==========================
@@ -253,11 +270,18 @@ services:
       SERVER_PORT: "8080"
       SPRING_PROFILES_ACTIVE: "dev"
       SPRING_APPLICATION_NAME: "authorizationserver"
-      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: "http://admin:letmein@discoveryservice:5002/eureka/"
-      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: "http://authorizationserver:9001/authorization"
+      
+        # ให้ Spring Authorization Server ประกาศ issuer เป็นโดเมน public
+      SPRING_SECURITY_OAUTH2_AUTHORIZATIONSERVER_ISSUER: "https://auth.beus.biz/authorization"
 
+      # ❌ ลบหรือคอมเมนต์บรรทัดนี้ออก
+      # SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: "http://authorizationserver:8080/authorization"
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: "http://admin:letmein@discoveryservice:5002/eureka/"
+      
       # ใช้ค่าจาก .env
-      ISSUER_URI: "${ISSUER_URI}"
+      # ISSUER_URI: "${ISSUER_URI}"
+      # ออก token ด้วย iss ที่โลกภายนอกจะใช้จริง (ผ่าน gateway:8080)
+      # ISSUER_URI: "http://18.142.185.25:9001/authorization"
       SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/${LOCAL_POSTGRES_DB}"
       SPRING_DATASOURCE_USERNAME: "${LOCAL_POSTGRES_USER}"
       SPRING_DATASOURCE_PASSWORD: "${LOCAL_POSTGRES_PASSWORD}"
@@ -265,6 +289,9 @@ services:
       SPRING_JPA_SHOW_SQL: "false"
       SPRING_JPA_PROPERTIES_HIBERNATE_DIALECT: "org.hibernate.dialect.PostgreSQLDialect"
       TZ: Asia/Bangkok
+
+      # อยู่หลัง CF/Nginx (ทางเลือก) ช่วยเรื่อง header เวลาอยู่หลัง gateway/reverse proxy
+      SERVER_FORWARD_HEADERS_STRATEGY: "framework"
       
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8080/authorization/actuator/health | grep -q '\"status\":\"UP\"'"]
@@ -272,6 +299,45 @@ services:
       timeout: 5s
       retries: 30
       start_period: 40s
+  
+  # ==========================
+  # App: API Gateway
+  # ==========================
+  gateway:
+    profiles: ["app"]
+    build:
+      context: ../backend/gateway
+      dockerfile: Dockerfile
+    container_name: gateway
+    restart: unless-stopped
+    depends_on:
+      discoveryservice:
+        condition: service_healthy
+      authorizationserver:
+        condition: service_healthy
+    networks: [web]
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: "dev"
+      SERVER_PORT: "8080"
+      SPRING_APPLICATION_NAME: "gateway"
+
+      # Eureka
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: "http://admin:letmein@discoveryservice:5002/eureka/"
+      EUREKA_HOSTNAME: "gateway"
+
+      # ✅ sync
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: "${ISSUER_URI}"
+      ISSUER_URI: "${ISSUER_URI}"
+
+      TZ: Asia/Bangkok
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/actuator/health | grep -q '\"status\":\"UP\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
 
   # ==========================
   # App: User Service
@@ -415,45 +481,6 @@ services:
       start_period: 30s
 
   # ==========================
-  # App: API Gateway
-  # ==========================
-  gateway:
-    profiles: ["app"]
-    build:
-      context: ../backend/gateway
-      dockerfile: Dockerfile
-    container_name: gateway
-    restart: unless-stopped
-    depends_on:
-      discoveryservice:
-        condition: service_healthy
-      authorizationserver:
-        condition: service_healthy
-    networks: [web]
-    ports:
-      - "8080:8080"
-    environment:
-      SPRING_PROFILES_ACTIVE: "dev"
-      SERVER_PORT: "8080"
-      SPRING_APPLICATION_NAME: "gateway"
-
-      # Eureka
-      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: "http://admin:letmein@discoveryservice:5002/eureka/"
-      EUREKA_HOSTNAME: "gateway"
-
-      # ✅ sync
-      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: "${ISSUER_URI}"
-      ISSUER_URI: "${ISSUER_URI}"
-
-      TZ: Asia/Bangkok
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8080/actuator/health | grep -q '\"status\":\"UP\"'"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 30s
-
-  # ==========================
   # App: Frontend SSR (Angular)
   # ==========================
   frontend-ssr:
@@ -480,23 +507,10 @@ services:
     networks: [web]
     ports:
       - "5000:80"
+    volumes:                    # ← volumes อยู่ใต้ service
+      - ./some/local/path:/container/path:ro
 
-  # ==========================
-  # App: Ticket App (SPA)
-  # ==========================
-  ticketapp:
-    profiles: ["app"]
-    build:
-      context: ../frontend/ticketapp
-      dockerfile: Dockerfile
-      args:
-        CONFIG: production
-    container_name: ticketapp
-    restart: unless-stopped
-    networks: [web]
-    ports:
-      - "3001:80"
-      - "3003:3003"
+
 
   # ==========================
   # App: RTMP Live Stream Server
@@ -511,8 +525,9 @@ services:
     networks: [web]
     ports:
       - "1935:1935"
-      - "8082:8080"
+      - "8082:8082"
       - "3000:3000"
+
 
   # ==========================
   # App: Nginx Reverse Proxy
@@ -528,9 +543,13 @@ services:
       - frontend-internal
     ports:
       - "80:80"
+      - "443:443"
     volumes:
-      - ./nginx/sites-available:/etc/nginx/conf.d
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - /home/ubuntu/fullchain.pem:/etc/ssl/cloudflare/fullchain.pem:ro
+      - /home/ubuntu/privkey.pem:/etc/ssl/cloudflare/privkey.pem:ro
+
 
 
 # ลำดับการ RUN (ชัดเจนทีละเฟส)

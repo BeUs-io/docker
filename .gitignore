@@ -7,3 +7,11 @@ dist/
 target/
 .idea/
 .vscode/
+
+# Ignore sensitive files
+.env
+*.pem
+*.crt
+*.key
+*.log
+

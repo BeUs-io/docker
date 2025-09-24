@@ -136,3 +136,14 @@ SELECT upsert_oauth2_client(
   '{"require-proof-key": false, "require-authorization-consent": false}',
   '{"access-token-time-to-live": "PT30M"}'
 );
+
+SELECT upsert_oauth2_client(
+  'c3', 'spa-client', null, 'SPA Client',
+  'none',
+  'authorization_code',
+  'https://ticket.beus.biz/auth/callback',
+  'https://ticket.beus.biz',
+  'openid,profile,email,api.read',
+  '{"require-proof-key": true, "require-authorization-consent": true}',
+  '{"access-token-time-to-live": "PT15M", "reuse-refresh-tokens": false}'
+);
